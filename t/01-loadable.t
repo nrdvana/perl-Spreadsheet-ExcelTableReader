@@ -21,6 +21,6 @@ my $tr= new_ok( 'Spreadsheet::ExcelTableReader', [
 
 is( scalar($tr->field_list), 2, '2 fields' );
 is( $tr->fields->[0]->name, 'foo', 'first field "foo"' );
-like( 'Foo ', $tr->fields->[0]->header_pattern, 'foo header pattern' );
+like( 'Foo ', $tr->fields->[0]->header_regex, 'foo header pattern' );
 
 done_testing;

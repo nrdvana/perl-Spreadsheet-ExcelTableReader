@@ -7,6 +7,8 @@ use Log::Any '$log';
 use Spreadsheet::ExcelTableReader::Field;
 use Carp 'croak';
 
+our $VERSION= '0.000001';
+
 # ABSTRACT: Module to extract a table from somewhere within an Excel spreadsheet
 
 =head1 DESCRIPTION
@@ -16,7 +18,7 @@ and L<Spreadsheet::XLSX>, and L<Data::Table::Excel>.  The problem comes from the
 are exchanging files, adding rows or columns, or otherwise mucking around with the layout.
 
 The purpose of this module is to help you find your data table somewhere within an excel file, and
-clean it up as you extract it.
+clean up and/or validate the values as you extract them.
 It uses the names (or regexes) of header columns to locate the header row, and then pulls the data
 rows below that until the first blank row (or end of file).  The columns do not need to be in the
 same order as you specified, and you have the option to ignore unknown columns, and the option to
@@ -229,7 +231,7 @@ sub find_table {
 	# Algorithm is O(N^4) in worst case, but the regex should make it more like O(N^2) in most
 	# real world cases.  The worst case would be if every row of every sheet of the workbook almost
 	# matched the header row (which could happen with extremely lax field header patterns) 
-	my $header_regex= qr/(?:@{[ join('|', map { $_->header_pattern } @fields) ]})/ms;
+	my $header_regex= qr/(?:@{[ join('|', map { $_->header_regex } @fields) ]})/ms;
 
 	# Scan top-down across all sheets at once, since headers are probably at the top of the document.
 	my $row= 0;
@@ -291,7 +293,7 @@ sub _resolve_field_columns {
 		next unless defined $v and length $v;
 		for my $field (@$fields) {
 			push @{ $field_found{$field->name} }, $col
-				if $v =~ $field->header_pattern;
+				if $v =~ $field->header_regex;
 		}
 	}
 	
