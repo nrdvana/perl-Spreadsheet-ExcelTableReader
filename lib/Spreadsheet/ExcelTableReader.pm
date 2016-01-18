@@ -97,7 +97,7 @@ Convenient list accessor for L</fields>.  Not writeable.
 
 =cut
 
-has fields => ( is => 'ro', coerce => \&_coerce_field_list );
+has fields => ( is => 'ro', required => 1, coerce => \&_coerce_field_list );
 sub field_list { @{ shift->fields } }
 
 =head2 find_table_args
@@ -127,12 +127,18 @@ sub _build__sheets {
 		# We will run both parsers on it (because file names can lie) but try the one that
 		# matches the file extension first.  In the case of a file handle, we just try them
 		# in order.
-		my @parsers= ( 'Spreadsheet::XLSX', 'Spreadsheet::ParseExcel' );
+		my @parsers= (
+			sub {
+				Spreadsheet::XLSX->new($self->file);
+			},
+			sub {
+				Spreadsheet::ParseExcel->new->parse($self->file);
+			}
+		);
 		@parsers= reverse @parsers if ($self->file =~ /\.xls$/);
 		
-		for (@parsers) {
-			my $p= $_->new;
-			$wbook= $p->parse($self->file)
+		for my $parser (@parsers) {
+			$wbook= eval { $parser->() }
 				and last;
 		}
 		defined $wbook or croak "Can't parse file '".$self->file."'";
@@ -176,8 +182,8 @@ sub _coerce_field_list {
 			);
 		} elsif (ref $_ eq 'HASH') {
 			my %args= %$_;
-			# "isa" alias for the validate attribute
-			$args{validate}= delete $args{isa} if defined $args{isa} && !defined $args{validate};
+			# "isa" alias for the 'type' attribute
+			$args{type}= delete $args{isa} if defined $args{isa} && !defined $args{type};
 			# default header to field name with optional whitespace
 			$args{header}= qr/^\s*\Q$args{name}\E\s*$/i unless defined $args{header};
 			$_= Spreadsheet::ExcelTableReader::Field->new( %args )
@@ -333,6 +339,8 @@ sub _resolve_field_columns {
 		}
 	}
 	# Success!  convert the col map to an array of col-index-per-field
+	$log->debug("Found headers at ".join(' ', map { _cell_name($row,$_) } sort keys %col_map))
+		if $log->is_debug;
 	return { reverse %col_map };
 }
 
@@ -372,36 +380,29 @@ sub record_count {
 	return $self->_table_location->{max_row} - $self->_table_location->{min_row} + 1;
 }
 
-=head2 hashes
+=head2 records
 
-Returns an arrayref of hashrefs
+  my $records= $tr->records( %options );
 
-=cut
-
-sub hashes {
-	my $self= shift;
-	my $i= $self->iterator(hash => 1);
-	my @records;
-	push @records, $i->() while $records[-1];
-	pop @records;
-	return \@records;
-}
-
-=head2 arrays
-
-Return an arrayref of arrayrefs.  Eeach record will have values in the order defined in your fields
-array.
+Returns an arrayref of records, each as a hashref (unless arrays are requested in %options).
 
 =cut
 
-sub arrays {
-	my $self= shift;
-	my $i= $self->iterator(hash => 0);
+sub records {
+	my ($self, %opts)= @_;
+	my $i= $self->iterator(%opts);
 	my @records;
-	push @records, $i->() while $records[-1];
-	pop @records;
+	while (my $r= $i->()) { push @records, $r; }
 	return \@records;
 }
+
+=head2 record_arrays
+
+Returns an arrayref of arrayrefs.  Shortcut for C<< $tr->records(as => 'array') >>.
+
+=cut
+
+sub record_arrays { shift->records(as => 'array', @_) }
 
 =head2 iterator
 
@@ -431,8 +432,12 @@ our %_Iterators;
 
 sub iterator {
 	my ($self, %opts)= @_;
-	my ($hash, $blank_row, $on_error)= delete @opts{'hash','blank_row','on_error'};
-	croak "Unknown option(s) to iterator: ".join(', ', keys %opts);
+	my ($as, $blank_row, $on_error)= delete @opts{'as','blank_row','on_error'};
+	croak "Unknown option(s) to iterator: ".join(', ', keys %opts)
+		if keys %opts;
+	
+	$as= 'hash' unless defined $as;
+	my $hash= ($as eq 'hash');
 	
 	$blank_row= 'end' unless defined $blank_row;
 	my $skip_blank_row= ($blank_row eq 'skip');
@@ -446,12 +451,22 @@ sub iterator {
 	my $remaining= $self->_table_location->{max_row} - $self->_table_location->{min_row} + 1;
 	my $is_blank_row;
 	my %field_col= %{ $self->_table_location->{field_col} };
-	my @used_fields= grep { defined $field_col{$_->name} } $self->field_list;
-	my @result_keys= map { $_->{name} } @used_fields;
-	my @field_extractors= map {
-		my $blank= $_->blank;
-		my $src_col= $field_col{$_->name};
-		$_->trim?
+	my (@result_keys, @field_extractors, @validations);
+	for my $field ($self->field_list) {
+		my $blank= $field->blank;
+		my $src_col= $field_col{$field->name};
+		
+		# Don't need an extractor for fields not found in the table if result type is hash,
+		# but if result type is array we need to pad with a null value
+		if (!defined $src_col) {
+			$hash or push @field_extractors, sub { undef; };
+			next;
+		}
+		
+		push @result_keys, $field->name if $hash;
+		
+		# If trimming, use a different implementation than if not, for a little efficiency
+		push @field_extractors, $field->trim?
 			sub {
 				my $v= $sheet->get_cell($row, $src_col);
 				return $blank unless defined $v;
@@ -461,19 +476,18 @@ sub iterator {
 				$is_blank_row= 0;
 				$v;
 			}
-		:	sub {
+		:
+			sub {
 				my $v= $sheet->get_cell($row, $src_col);
 				defined $v && length($v= $v->value)
 					or return $blank;
 				$is_blank_row= 0;
 				$v;
-			}
-		} @used_fields;
-	my @validations;
-	for (my $i= 0; $i < @used_fields; $i++) {
-		if (my $type= $used_fields[$i]->type) {
-			my $idx= $i;
-			my $src_col= $field_col{$used_fields[$i]->name};
+			};
+		
+		if (defined (my $type= $field->type)) {
+			# This sub will access the values array at the same position as the current field_extractor
+			my $idx= $#field_extractors;
 			push @validations, sub {
 				return if $type->check($_[0][$idx]);
 				$col= $src_col; # so the iterator->col reports the column of the error
@@ -484,6 +498,7 @@ sub iterator {
 	
 	# Closure over everything, for very fast access
 	my $sub= sub {
+		$log->trace("iterator: remaining=$remaining row=$row sheet=$sheet");
 		again:
 		return unless $remaining > 0;
 		++$row;

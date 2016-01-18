@@ -33,7 +33,7 @@ Whether or not to remove prefix/suffix whitespace from each value of the field. 
 The value to extract when the spreadsheet cell is empty.  (where "empty" depends on the value of
 C<trim>).  Default is undef.  Other common value would be C<"">.
 
-=head2 validate
+=head2 type
 
 A L<Type::Tiny> type (or any object or class with a C<check> method) which will validate each value
 pulled from a cell for this field.  Optional.  No default.
@@ -45,7 +45,7 @@ has header   => ( is => 'ro', required => 1 );
 has required => ( is => 'ro', default => sub { 1 } );
 has trim     => ( is => 'ro', default => sub { 1 } );
 has blank    => ( is => 'ro' ); # default is undef
-has validate => ( is => 'ro', isa => sub { $_[0]->can('check') }, required => 0 );
+has type     => ( is => 'ro', isa => sub { $_[0]->can('check') }, required => 0 );
 
 =head2 header_regex
 
