@@ -11,7 +11,7 @@ use Carp 'croak';
 
 =head1 DESCRIPTION
 
-Reading data from a spreadsheet is't too hard thanks to modules like L<Spreadsheet::ParseExcel>
+Reading data from a spreadsheet isn't too hard thanks to modules like L<Spreadsheet::ParseExcel>
 and L<Spreadsheet::XLSX>, and L<Data::Table::Excel>.  The problem comes from the users, when they
 are exchanging files, adding rows or columns, or otherwise mucking around with the layout.
 
@@ -20,10 +20,10 @@ clean it up as you extract it.
 It uses the names (or regexes) of header columns to locate the header row, and then pulls the data
 rows below that until the first blank row (or end of file).  The columns do not need to be in the
 same order as you specified, and you have the option to ignore unknown columns, and the option to
-proceed even if not all the columns you wanted were found.
+proceed even if not all of your columns were found.
 
-The default options are to make sure it found all your data columns, ignore extra columns, and
-strip off whitespace, and throw exceptions if it can't do those things.
+The default options are to make sure it found all your data columns, ignore extra columns, strip
+off whitespace, and throw exceptions if it can't do those things.
 
 =head1 SYNOPSIS
 
@@ -44,7 +44,7 @@ strip off whitespace, and throw exceptions if it can't do those things.
   $data= $tr->arrays;
   # -or-
   my $i= $tr->iterator(hash => 1);
-  while ($my $rec= $i->()) { ... }
+  while (my $rec= $i->()) { ... }
 
 =head1 ATTRIBUTES
 
@@ -62,8 +62,8 @@ has file => ( is => 'ro' );
 =head2 C<sheet>
 
 This is either a sheet name, a regex for matching a sheet name, or a parser's worksheet instance.
-It is also optional; if you don't specify a sheet then this table reader will search all sheets in
-numerical order looking for your table columns.
+It is also optional; if you don't specify a sheet then this table reader will search all sheets
+looking for your table columns.
 
 =cut
 
@@ -83,11 +83,15 @@ that constructs one, or just a simple string that we use to build a field with d
   # becomes this
   fields => [ Spreadsheet::ExcelTableReader::Field->new( 
     name     => 'foo',
-    header   => qr/^\W*\Q$foo\E\W*$/,
+    header   => qr/^\W*$foo\W*$/,
     required => 1,
     trim     => 1,
     blank    => undef
   ) ]
+
+=head2 field_list
+
+Convenient list accessor for L</fields>.  Not writeable.
 
 =cut
 
@@ -96,19 +100,13 @@ sub field_list { @{ shift->fields } }
 
 =head2 find_table_args
 
-Supplies default arguments to find_table.  These are ignored if you call find_table directly.
+Supplies default arguments to L</find_table>.  These are ignored if you call C<find_table> directly.
 
 =cut
 
 has find_table_args => ( is => 'rw' );
 
-has _table_location => ( is => 'lazy' );
-
-sub BUILD {
-	my $self= shift;
-	# Any errors getting the list of searchable worksheets should happen now, during construction time
-	$self->_sheets;
-}
+has _table_location => ( is => 'rw', lazy_build => 1 );
 
 sub _build__sheets {
 	my $self= shift;
@@ -190,6 +188,20 @@ sub _coerce_field_list {
 
 =head1 METHODS
 
+=head2 new
+
+Standard Moo constructor, accepting attributes as hash or hashref.
+Dies if it doesn't have any sheets to work with.  (i.e. it tries to open the file if necessary, and
+sees if any sheets match your C<sheet> specification)
+
+=cut
+
+sub BUILD {
+	my $self= shift;
+	# Any errors getting the list of searchable worksheets should happen now, during construction time
+	$self->_sheets;
+}
+
 =head2 find_table
 
   $tr->find_table( %params )
@@ -203,86 +215,45 @@ Returns true if it located the header, or false otherwise.
 
 sub _cell_name {
 	my ($row, $col)= @_;
-	return int2col($col).($row+0);
+	return int2col($col).($row+1);
 }
 
 sub find_table {
 	my $self= shift;
 	
+	my $location;
 	my @sheets= @{$self->_sheets};
 	my @fields= $self->field_list;
+	my $num_required_fields= grep { $_->required } @fields;
+	
+	# Algorithm is O(N^4) in worst case, but the regex should make it more like O(N^2) in most
+	# real world cases.  The worst case would be if every row of every sheet of the workbook almost
+	# matched the header row (which could happen with extremely lax field header patterns) 
+	my $header_regex= qr/(?:@{[ join('|', map { $_->header_pattern } @fields) ]})/ms;
+
+	# Scan top-down across all sheets at once, since headers are probably at the top of the document.
 	my $row= 0;
-	my $location;
-	# Using a dumb N^4 algorithm for now.  Should be possible to do something better by combining all the
-	# regexes and comparing to the concatenated value of the row.
-	# But, in most cases we will find the table on the first ~5 rows of the worksheet
-	my $in_range= 1;
-	my %required_fields= map { $_->name => 1 } grep { $_->required } @fields;
+	my $in_range= 1; # flag turns false if we pass the bottom of all sheets
 	row_loop: while ($in_range) {
 		$in_range= 0;
-		sheet_loop: for my $sheet (@sheets) {
+		for my $sheet (@sheets) {
+			$log->trace("row $row sheet $sheet") if $log->is_trace;
 			my %field_found;
 			my ($rmin, $rmax)= $sheet->row_range();
+			my ($cmin, $cmax)= $sheet->col_range();
 			next unless $row >= $rmin && $row <= $rmax;
 			$in_range++;
-			
-			# Try each cell to see if it matches each field's header
-			my ($cmin, $cmax)= $sheet->col_range();
-			for my $col ($cmin..$cmax) {
-				my $v= $sheet->get_cell($row, $col);
-				next unless defined $v;
-				$v= $v->value;
-				next unless defined $v and length $v;
-				for my $field ($self->field_list) {
-					push @{ $field_found{$field->name} }, $col
-						if $v =~ $field->header_pattern;
-				}
-			}
-			
-			# Now see if we found all the required fields
-			if (keys %field_found >= keys %required_fields) {
-				# Is every required field found?
-				unless (grep { !$field_found{$_} } keys %required_fields) {
-					# Is there one and only one mapping of fields to columns?
-					my @todo= @fields;
-					my %col_map;
-					my $ambiguous= 0;
-					while (@todo) {
-						my $field= shift @todo;
-						next unless defined $field_found{$field->name};
-						my $possible= $field_found{$field->name};
-						my @available= grep { !defined $col_map{$_} } @$possible;
-						if (!@available) {
-							# It is possible that two fields claim the same columns and one is required
-							if ($field->required) {
-								my $col= $possible->[0];
-								$log->debug("Field ".$field->name." and ".$col_map{$col}." would both claim "._cell_name($row, $col))
-									if $log->is_debug;
-								next sheet_loop;
-							}
-						}
-						elsif (@available > 1) {
-							# It is possible for a field to match more than one column.
-							# If so, we send it to the back of the list in case another more specific
-							# column claims one of the options.
-							if (++$ambiguous >= @todo) {
-								$log->debug("Can't decide between ".join(', ', map { _cell_name($row,$_) } @available)." for field ".$field->name)
-									if $log->is_debug;
-								next sheet_loop;
-							}
-							push @todo, $field;
-						}
-						else {
-							$col_map{$available[0]}= $field->name;
-							--$ambiguous if @$possible > 1;
-						}
-					}
-					# Success!  convert the col map to an array of col-index-per-field
+			my @row_vals= map { my $c= $sheet->get_cell($row, $_); $c? $c->value : '' } 0..$cmax;
+			my $match_count= grep { $_ =~ $header_regex } @row_vals;
+			$log->trace("str=@row_vals, regex=$header_regex, match_count=$match_count");
+			if ($match_count >= $num_required_fields) {
+				my $field_col= $self->_resolve_field_columns($sheet, $row, \@row_vals);
+				if ($field_col) {
 					$location= {
 						sheet => $sheet,
 						header_row => $row,
 						min_row => $row+1,
-						field_col => { reverse %col_map },
+						field_col => $field_col,
 					};
 					last row_loop;
 				}
@@ -306,6 +277,61 @@ sub find_table {
 	$self->_table_location($location);
 	
 	return 1;
+}
+
+sub _resolve_field_columns {
+	my ($self, $sheet, $row, $row_vals)= @_;
+	my %col_map;
+	my %field_found;
+	my $fields= $self->fields;
+	
+	# Try each cell to see if it matches each field's header
+	for my $col (0..$#$row_vals) {
+		my $v= $row_vals->[$col];
+		next unless defined $v and length $v;
+		for my $field (@$fields) {
+			push @{ $field_found{$field->name} }, $col
+				if $v =~ $field->header_pattern;
+		}
+	}
+	
+	# Is there one and only one mapping of fields to columns?
+	my $ambiguous= 0;
+	my @todo= @$fields;
+	while (@todo) {
+		my $field= shift @todo;
+		next unless defined $field_found{$field->name};
+		my $possible= $field_found{$field->name};
+		my @available= grep { !defined $col_map{$_} } @$possible;
+		$log->trace("ambiguous=$ambiguous : field ".$field->name." could be ".join(',', map { _cell_name($row,$_) } @$possible)
+			." and ".join(',', map { _cell_name($row,$_) } @available)." are available");
+		if (!@available) {
+			# It is possible that two fields claim the same columns and one is required
+			if ($field->required) {
+				my $col= $possible->[0];
+				$log->debug("Field ".$field->name." and ".$col_map{$col}." would both claim "._cell_name($row, $col))
+					if $log->is_debug;
+				return;
+			}
+		}
+		elsif (@available > 1) {
+			# It is possible for a field to match more than one column.
+			# If so, we send it to the back of the list in case another more specific
+			# column claims one of the options.
+			if (++$ambiguous > @todo) {
+				$log->debug("Can't decide between ".join(', ', map { _cell_name($row,$_) } @available)." for field ".$field->name)
+					if $log->is_debug;
+				return;
+			}
+			push @todo, $field;
+		}
+		else {
+			$col_map{$available[0]}= $field->name;
+			$ambiguous= 0; # made progress, start counting over again
+		}
+	}
+	# Success!  convert the col map to an array of col-index-per-field
+	return { reverse %col_map };
 }
 
 =head2 table_location
