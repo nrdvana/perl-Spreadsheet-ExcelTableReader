@@ -120,9 +120,32 @@ sub _build__sheets {
 	}
 	
 	# Else we need to scan sheets from the excel file.  Make sure we have the file
+	my $wbook= $self->_open_workbook($self->file);
+	my @sheets= $wbook->worksheets;
+	@sheets or croak "No worksheets in file?";
+	if (defined $self->sheet) {
+		if (ref($self->sheet) eq 'Regexp') {
+			@sheets= grep { $_->get_name =~ $self->sheet } @sheets;
+		} elsif (ref($self->sheet) eq 'CODE') {
+			@sheets= grep { $self->sheet->($_) } @sheets;
+		} elsif (!ref $self->sheet) {
+			@sheets= grep { $_->get_name eq $self->sheet } @sheets;
+		} else {
+			croak "Unknown type of sheet specification: ".$self->sheet;
+		}
+	}
+	@sheets or croak "No worksheets match the specification";
+	
+	return \@sheets;
+}
+
+sub _open_workbook {
+	my ($self, $f)= @_;
+	
+	defined $f or croak "workbook file is undefined";
+	
 	my $wbook;
-	my $f= $self->file;
-	if ($f && ref($f) && ref($f)->can('worksheets')) {
+	if (ref($f) && ref($f)->can('worksheets')) {
 		$wbook= $f;
 	} else {
 		my $type= "xlsx";
@@ -160,23 +183,7 @@ sub _build__sheets {
 		}
 		defined $wbook or croak "Can't parse file '".$self->file."'";
 	}
-	
-	my @sheets= $wbook->worksheets;
-	@sheets or croak "No worksheets in file?";
-	if (defined $self->sheet) {
-		if (ref($self->sheet) eq 'Regexp') {
-			@sheets= grep { $_->get_name =~ $self->sheet } @sheets;
-		} elsif (ref($self->sheet) eq 'CODE') {
-			@sheets= grep { $self->sheet->($_) } @sheets;
-		} elsif (!ref $self->sheet) {
-			@sheets= grep { $_->get_name eq $self->sheet } @sheets;
-		} else {
-			croak "Unknown type of sheet specification: ".$self->sheet;
-		}
-	}
-	@sheets or croak "No worksheets match the specification";
-	
-	return \@sheets;
+	return $wbook;
 }
 
 sub _build__table_location {
