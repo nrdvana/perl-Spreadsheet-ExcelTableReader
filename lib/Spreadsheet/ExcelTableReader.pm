@@ -6,6 +6,7 @@ use Spreadsheet::XLSX;
 use Log::Any '$log';
 use Spreadsheet::ExcelTableReader::Field;
 use Carp 'croak';
+use IO::Handle;
 
 our $VERSION= '0.000001';
 
@@ -120,26 +121,42 @@ sub _build__sheets {
 	
 	# Else we need to scan sheets from the excel file.  Make sure we have the file
 	my $wbook;
-	if ($self->file && ref($self->file) && ref($self->file)->can('worksheets')) {
-		$wbook= $self->file;
+	my $f= $self->file;
+	if ($f && ref($f) && ref($f)->can('worksheets')) {
+		$wbook= $f;
 	} else {
-		# File must be a filename, or file handle, or object that acts line one or the other
-		# We will run both parsers on it (because file names can lie) but try the one that
-		# matches the file extension first.  In the case of a file handle, we just try them
-		# in order.
-		my @parsers= (
-			sub {
-				Spreadsheet::XLSX->new($self->file);
-			},
-			sub {
-				Spreadsheet::ParseExcel->new->parse($self->file);
-			}
-		);
-		@parsers= reverse @parsers if ($self->file =~ /\.xls$/);
+		my $type= "xlsx";
 		
-		for my $parser (@parsers) {
-			$wbook= eval { $parser->() }
-				and last;
+		# Probe the file to determine type
+		if (ref($f) eq 'GLOB' or ref($f) && ref($f)->can('read')) {
+			my $fpos= $f->tell;
+			$fpos >= 0 or croak "File handle must be seekable";
+			$f->read(my $buf, 4) == 4 or croak "read($f,4): $!";
+			$f->seek($fpos, 0) or croak "failed to seek back to start of file";
+			$type= 'xls' if $buf eq "\xD0\xCF\x11\xE0";
+		}
+		elsif (-e $f) {
+			$f= "$f"; # force stringification
+			open my $fh, '<', $f or croak "open($f): $!";
+			read($fh, my $buf, 4) == 4 or croak "read($f,4): $!";
+			$type= 'xls' if $buf eq "\xD0\xCF\x11\xE0";
+		}
+		else {
+			$log->notice("Can't determine parser for '$f', guessing '$type'") if $log->is_notice;
+		}
+		
+		if ($type eq 'xlsx') {
+			# Spreadsheet::XLSX uses Archive::Zip which can *only* work on IO::Handle
+			# instances, not plain globrefs. (seems like a bug, hm)
+			if (ref($f) eq 'GLOB') {
+				require IO::File;
+				my $f_obj= IO::File->new;
+				$f_obj->fdopen($f, 'r') or croak "Can't convert GLOBref to IO::File";
+				$f= $f_obj;
+			}
+			$wbook= Spreadsheet::XLSX->new($f);
+		} else {
+			$wbook= Spreadsheet::ParseExcel->new->parse($f);
 		}
 		defined $wbook or croak "Can't parse file '".$self->file."'";
 	}
