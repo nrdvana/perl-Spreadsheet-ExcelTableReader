@@ -8,7 +8,7 @@ use Spreadsheet::ExcelTableReader::Field;
 use Carp 'croak';
 use IO::Handle;
 
-our $VERSION= '0.000001';
+our $VERSION= '0.000001_001';
 
 # ABSTRACT: Module to extract a table from somewhere within an Excel spreadsheet
 
