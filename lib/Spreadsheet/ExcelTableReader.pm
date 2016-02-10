@@ -502,6 +502,8 @@ The estimate of the number of rows remaining.  This can be a lie if { blank_row 
 
 Resets the iterator for another run through the same data
 
+=back
+
 =cut
 
 our %_Iterators;
