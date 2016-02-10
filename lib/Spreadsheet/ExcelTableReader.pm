@@ -2,21 +2,22 @@ package Spreadsheet::ExcelTableReader;
 use Moo 2;
 use Spreadsheet::ParseExcel;
 use Spreadsheet::ParseExcel::Utility 'int2col';
-use Spreadsheet::XLSX;
+use Spreadsheet::ParseXLSX;
 use Log::Any '$log';
 use Spreadsheet::ExcelTableReader::Field;
 use Carp 'croak';
 use IO::Handle;
 
-our $VERSION= '0.000001_002';
+our $VERSION= '0.000001_003';
 
 # ABSTRACT: Module to extract a table from somewhere within an Excel spreadsheet
 
 =head1 DESCRIPTION
 
 Reading data from a spreadsheet isn't too hard thanks to modules like L<Spreadsheet::ParseExcel>
-and L<Spreadsheet::XLSX>, and L<Data::Table::Excel>.  The problem comes from the users, when they
-are exchanging files, adding rows or columns, or otherwise mucking around with the layout.
+and L<Spreadsheet::ParseXLSX>, and L<Data::Table::Excel>.  However there are often problems with
+knowing what/where to parse, because Excel files are generally considered a human interface and
+people might add or edit column headers or move the table around.
 
 The purpose of this module is to help you find your data table somewhere within an excel file, and
 clean up and/or validate the values as you extract them.
@@ -42,11 +43,11 @@ off whitespace, and throw exceptions if it can't do those things.
     ],
   );
   
-  my $data= $tr->hashes;
+  my $data= $tr->records;
   # -or-
-  $data= $tr->arrays;
+  $data= $tr->record_arrays;
   # -or-
-  my $i= $tr->iterator(hash => 1);
+  my $i= $tr->iterator(as => 'hash');
   while (my $rec= $i->()) { ... }
 
 =head1 ATTRIBUTES
@@ -54,7 +55,8 @@ off whitespace, and throw exceptions if it can't do those things.
 =head2 C<file>
 
 This is either a filename (which gets coerced into a parser instance) or a parser instance that you
-created.  Currently supported parsers are L<Spreadsheet::ParseExcel> and L<Spreadsheet::XLSX>.
+created.  Currently supported parsers are L<Spreadsheet::ParseExcel>, L<Spreadsheet::ParseXLSX>,
+and L<Spreadsheet::XLSX>.
 
 C<file> is not required if you supplied a parser's worksheet object as L</sheet>
 
@@ -86,7 +88,7 @@ that constructs one, or just a simple string that we use to build a field with d
   # becomes this
   fields => [ Spreadsheet::ExcelTableReader::Field->new( 
     name     => 'foo',
-    header   => qr/^\W*$foo\W*$/,
+    header   => qr/^\s*$foo\s*$/,
     required => 1,
     trim     => 1,
     blank    => undef
@@ -169,15 +171,15 @@ sub _open_workbook {
 		}
 		
 		if ($type eq 'xlsx') {
-			# Spreadsheet::XLSX uses Archive::Zip which can *only* work on IO::Handle
+			# Spreadsheet::ParseXLSX uses Archive::Zip which can *only* work on IO::Handle
 			# instances, not plain globrefs. (seems like a bug, hm)
-			if (ref($f) eq 'GLOB') {
-				require IO::File;
-				my $f_obj= IO::File->new;
-				$f_obj->fdopen($f, 'r') or croak "Can't convert GLOBref to IO::File";
-				$f= $f_obj;
-			}
-			$wbook= Spreadsheet::XLSX->new($f);
+			#if (ref($f) eq 'GLOB') {
+			#	require IO::File;
+			#	my $f_obj= IO::File->new;
+			#	$f_obj->fdopen($f, 'r') or croak "Can't convert GLOBref to IO::File";
+			#	$f= $f_obj;
+			#}
+			$wbook= Spreadsheet::ParseXLSX->new->parse($f);
 		} else {
 			$wbook= Spreadsheet::ParseExcel->new->parse($f);
 		}
@@ -390,25 +392,12 @@ sub table_location {
 	return \%loc;
 }
 
-=head2 record_count
-
-Returns the number of rows in the table, by a simple difference of Excel cell addresses.
-You might get a smaller number of rows back if you configure the iterator to skip or stop at empty
-rows.
-
-=cut
-
-sub record_count {
-	my $self= shift;
-	return 0 unless defined $self->_table_location;
-	return $self->_table_location->{max_row} - $self->_table_location->{min_row} + 1;
-}
-
 =head2 records
 
   my $records= $tr->records( %options );
 
 Returns an arrayref of records, each as a hashref (unless arrays are requested in %options).
+See L</iterator> for the list of options.
 
 =cut
 
@@ -430,25 +419,88 @@ sub record_arrays { shift->records(as => 'array', @_) }
 
 =head2 iterator
 
-  my $i= $tr->iterator(hash => 1);
+  my $i= $tr->iterator(as => 'array');
   while ($rec= $i->()) {
     ...
   }
 
-or if you want to ignore invalid data:
-
-  my $i= $tr->iterator(on_error => '');
-  while (1) {
-    my $rec= $i->();
-    last unless defined $rec;
-    if (! ref $rec) { warn "Error on row ".$i->row.", but continuing\n" }
-    else {
-      ...
-    }
-  }
-
 Returns a record iterator.  The iterator is a coderef which returns the next record each time you
 call it.  The iterator is also blessed, so you can call methods on it!  Isn't that cool?
+
+Parameters:
+
+=over
+
+=item as
+
+Either "array", for each record to be an arrayref of values in the same order as 'fields', or
+"hash", for each record to be a hashref of field=>value.
+
+The default is 'hash'.
+
+=item blank_row
+
+If this is set to 'skip', blank rows in the data will be ignored.  The iterator will return
+non-blank rows until it reaches the end of the file.
+
+If this is set to 'end', the first blank row in the data set will have an EOF effect.  No more rows
+can be returned until the iterator is reset.
+
+The default is 'end'.
+
+=item on_error
+
+If this is set to a coderef, then the coderef will be called if the row fails its validation
+I<instead> of throwing an exception.
+
+  on_error => sub {
+    my ($record, $failed_fields)= @_;
+    for my $field (@$failed_fields) {
+      if ($record->{ $field->name } ...) {
+        ...
+      }
+    }
+    return ...; # 'use' or 'skip' or 'end'
+  };
+
+The callback is given the record which failed the validation (which might be an arrayref or hashref
+depending on the other options) and an arrayref of each Field object which had an invalid value.
+
+If the callback returns 'use', the record (possibly modified by the callback) will be returned
+from the iterator like normal.  If the callback returns 'skip', the record will be skipped and the
+iterator will loop to the next row.  If the callback returns 'end', the iterator will return undef
+and go into an EOF state.
+
+A quick way to simply ignore rows which don't match your validation is:
+
+  my $records= $tr->records(on_error => sub { 'skip' });
+
+=back
+
+Methods:
+
+=over
+
+=item sheet
+
+The current worksheet object being processed by the iterator
+
+=item col
+
+The column index of the first column, or of the last cell that failed validation
+
+=item row
+
+The row number of the last record returned, or the index of the header if the first record has not
+been read
+
+=item remaining
+
+The estimate of the number of rows remaining.  This can be a lie if { blank_row => 'end' }
+
+=item rewind
+
+Resets the iterator for another run through the same data
 
 =cut
 
@@ -475,7 +527,7 @@ sub iterator {
 	my $remaining= $self->_table_location->{max_row} - $self->_table_location->{min_row} + 1;
 	my $is_blank_row;
 	my %field_col= %{ $self->_table_location->{field_col} };
-	my (@result_keys, @field_extractors, @validations);
+	my (@result_keys, @field_extractors, @validations, @error_fields);
 	for my $field ($self->field_list) {
 		my $blank= $field->blank;
 		my $src_col= $field_col{$field->name};
@@ -515,7 +567,9 @@ sub iterator {
 			push @validations, sub {
 				return if $type->check($_[0][$idx]);
 				$col= $src_col; # so the iterator->col reports the column of the error
-				croak "Not a ".$type->name." at cell "._cell_name($row, $col);
+				croak "Not a ".$type->name." at cell "._cell_name($row, $col)
+					unless defined $on_error;
+				push @error_fields, $field;
 			};
 		}
 	}
@@ -529,20 +583,34 @@ sub iterator {
 		$col= $min_col;
 		--$remaining;
 		$is_blank_row= 1; # This var is closured, and gets set to 0 by the next line
-		my @values= map { $_->() } @field_extractors;
+		my @values= map { &$_ } @field_extractors;
 		goto again if $skip_blank_row && $is_blank_row;
 		if ($end_blank_row && $is_blank_row) {
 			$remaining= 0;
-			return;
+			return undef;
 		}
+		@error_fields= ();
 		$_->(\@values) for @validations; # This can die.  It can also be an empty list.
-		return $hash? do { my %r; @r{@result_keys}= @values; \%r } : \@values;
+		my $row= $hash? do { my %r; @r{@result_keys}= @values; \%r } : \@values;
+		return $row unless @error_fields;
+		
+		# Let user callback decide what to do with invalid fields
+		$log->trace('Found invalid fields on row '.$row.': '.join(', ', map { $_->name } @error_fields))
+			if $log->is_trace;
+		my $decision= $on_error->( $row, [ @error_fields ] );
+		goto again if $decision eq 'skip';
+		return $row if $decision eq 'use';
+		if ($decision eq 'end') {
+			$remaining= 0;
+			return undef;
+		}
+		croak "on_error returned an invalid decision: '$decision'";
 	};
 	
 	# Blessed coderef, so we can call methods on it
 	bless $sub, 'Spreadsheet::ExcelTableReader::Iterator';
 	
-	# Store references to all the closered variables so the methods can access them
+	# Store references to all the closured variables so the methods can access them
 	$_Iterators{$sub}= {
 		r_sheet => \$sheet,
 		r_row => \$row,
