@@ -273,25 +273,23 @@ sub find_table {
 		for my $sheet (@sheets) {
 			$log->trace("row $row sheet $sheet") if $log->is_trace;
 			my %field_found;
-			my ($rmin, $rmax)= $sheet->row_range();
-			my ($cmin, $cmax)= $sheet->col_range();
+			my ($rmin, $rmax)= $sheet->row_range;
+			my ($cmin, $cmax)= $sheet->col_range;
 			next unless $row >= $rmin && $row <= $rmax;
 			$in_range++;
-			my @row_vals= map { my $c= $sheet->get_cell($row, $_); $c? $c->value : '' } 0..$cmax;
-			my $match_count= grep { $_ =~ $header_regex } @row_vals;
-			$log->trace("str=@row_vals, regex=$header_regex, match_count=$match_count");
-			if ($match_count >= $num_required_fields) {
-				my $field_col= $self->_resolve_field_columns($sheet, $row, \@row_vals);
-				if ($field_col) {
-					$location= {
-						sheet => $sheet,
-						header_row => $row,
-						min_row => $row+1,
-						field_col => $field_col,
-					};
-					last row_loop;
-				}
-			}
+			my @row_vals= map $self->_cell_to_value($sheet, $row, $_), 0..$cmax;
+			my @matches= grep $_ =~ $header_regex, @row_vals;
+			$log->trace("str=@row_vals, regex=$header_regex, matches=@matches");
+			next if @matches < $num_required_fields;
+			my $field_col= $self->_resolve_field_columns($sheet, $row, \@row_vals);
+			next if not $field_col;
+			$location= {
+				sheet => $sheet,
+				header_row => $row,
+				min_row => $row+1,
+				field_col => $field_col,
+			};
+			last row_loop;
 		}
 		++$row;
 	}
@@ -311,6 +309,12 @@ sub find_table {
 	$self->_table_location($location);
 	
 	return 1;
+}
+
+sub _cell_to_value {
+	my ($self, $sheet, $row, $cell)= @_;
+	my $c = $sheet->get_cell( $row, $cell );
+	return $c ? $c->value : '';
 }
 
 sub _resolve_field_columns {
