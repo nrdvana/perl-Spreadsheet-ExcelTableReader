@@ -64,6 +64,16 @@ C<file> is not required if you supplied a parser's worksheet object as L</sheet>
 
 has file => ( is => 'ro' );
 
+=head2 C<formatter>
+
+Optional object similar to Spreadsheet::ParseExcel::FmtDefault, configures how
+certain things like dates are parsed. If not provided the parsers will create
+a default formatter.
+
+=cut
+
+has formatter => ( is => 'ro' );
+
 =head2 C<sheet>
 
 This is either a sheet name, a regex for matching a sheet name, or a parser's worksheet instance.
@@ -179,9 +189,9 @@ sub _open_workbook {
 			#	$f_obj->fdopen($f, 'r') or croak "Can't convert GLOBref to IO::File";
 			#	$f= $f_obj;
 			#}
-			$wbook= Spreadsheet::ParseXLSX->new->parse($f);
+			$wbook= Spreadsheet::ParseXLSX->new->parse($f, $self->formatter);
 		} else {
-			$wbook= Spreadsheet::ParseExcel->new->parse($f);
+			$wbook= Spreadsheet::ParseExcel->new->parse($f, $self->formatter);
 		}
 		defined $wbook or croak "Can't parse file '".$self->file."'";
 	}
